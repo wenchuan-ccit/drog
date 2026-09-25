@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>藥品動態條碼掃描 APP</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- 引入專門掃描 1D Code-128 的 Quagga2 高速鏡頭引擎 -->
+  <script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2/dist/quagga.min.js"></script>
+</head>
+<body class="bg-slate-100 text-slate-800 pb-20">
+
+  <header class="bg-teal-700 text-white p-4 shadow-md text-center text-lg font-bold">
+    💊 藥品掃描與備貨管理
+  </header>
+
+  <main class="max-w-md mx-auto p-4 space-y-4">
+
+    <!-- 1. 即時相機動態視窗 -->
+    <div class="bg-white p-5 rounded-2xl shadow space-y-4 border border-slate-200">
+      <div class="flex justify-between items-center border-b pb-2">
+        <h2 class="font-bold text-slate-700">📷 即時動態掃描 Code-128</h2>
+        <span id="scanStatus" class="text-xs px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 font-semibold">相機已停止</span>
+      </div>
+
+      <!-- 相機即時影像顯示區 -->
+      <div id="interactive" class="viewport relative w-full h-64 bg-black rounded-xl overflow-hidden flex items-center justify-center">
+        <p class="text-white text-sm">請點擊下方按鈕啟動相機</p>
+      </div>
+
+      <div class="grid grid-cols-2 gap-2">
+        <button onclick="startScanner()" class="bg-teal-600 hover:bg-teal-700 text-white py-3 rounded-xl font-bold text-sm shadow">
+          ▶ 啟動即時掃描
+        </button>
+        <button onclick="stopScanner()" class="bg-slate-500 hover:bg-slate-600 text-white py-3 rounded-xl font-bold text-sm shadow">
+          ⏹ 關閉相機
+        </button>
+      </div>
+
+      <!-- 手動輸入備案 -->
+      <div class="pt-2 border-t">
+        <div class="flex gap-2">
+          <input id="manualBarcode" type="text" placeholder="手動輸入條碼..." class="flex-1 border px-3 py-2 rounded-xl text-sm focus:ring-2 focus:ring-teal-600">
+          <button onclick="searchManualBar()" class="bg-slate-700 text-white px-4 py-2 rounded-xl text-sm font-semibold">查詢</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. 藥品卡片區 -->
+    <div id="medicineCard" class="bg-white p-5 rounded-2xl shadow hidden space-y-4 border border-slate-200">
+      <div class="flex gap-4 items-start">
+        <img id="medImg" src="" class="w-24 h-24 object-cover rounded-xl border bg-slate-50 flex-shrink-0">
+        <div class="space-y-1 flex-1 min-w-0">
+          <h3 id="medChineseName" class="text-lg font-extrabold text-slate-900 break-words">--</h3>
+          <p id="medEnglishName" class="text-xs font-medium text-slate-500 italic break-words">--</p>
+          <span class="text-[11px] font-bold bg-slate-100 text-slate-600 px-2 py-0.5 rounded-md inline-block">📜 <span id="medLicenseNo">--</span></span>
+        </div>
+      </div>
+      <div id="restockBadge" class="p-2.5 rounded-xl text-center font-bold text-sm">--</div>
+      <div class="grid grid-cols-2 gap-2 border-t pt-3">
+        <button onclick="setRestock(true)" class="bg-amber-500 text-white py-2 rounded-xl text-sm font-bold shadow">📌 標記備貨</button>
+        <button onclick="setRestock(false)" class="bg-slate-500 text-white py-2 rounded-xl text-sm font-bold shadow">✅ 取消標記</button>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    // ⚠️ 請替換為您的 GAS 部署 Web App URL (/exec)
+    const GAS_API_URL = "https://script.google.com/macros/s/AKfycbzkNQstP1tSk17HhKfGqvfaF5gGqdFLUQJq3Jt4s7SOnPlJdgmCddYChOi6aZFf3Dtc/exec";
+    
+    let currentBarcode = null;
+    let isScanning = false;
+
+    function updateStatus(msg, isError = false) {
+      const el = document.getElementById('scanStatus');
+      el.innerText = msg;
+      el.className = isError 
+        ? "text-xs px-2.5 py-1 rounded-full bg-rose-100 text-rose-800 font-semibold"
+        : "text-xs px-2.5 py-1 rounded-full bg-teal-100 text-teal-800 font-semibold";
+    }
+
+    // 啟動 Quagga2 即時相機動態鏡頭
+    function startScanner() {
+      if (isScanning) return;
+      
+      Quagga.init({
+        inputStream: {
+          name: "Live",
+          type: "LiveStream",
+          target: document.querySelector('#interactive'),
+          constraints: {
+            facingMode: "environment", // 優先選擇後置相機
+            width: { min: 640 },
+            height: { min: 480 }
+          }
+        },
+        decoder: {
+          readers: ["code_128_reader"] // 針對 Code-128 條碼優化
+        },
+        locate: true
+      }, function(err) {
+        if (err) {
+          console.error(err);
+          updateStatus("相機啟動失敗", true);
+          alert("無法存取相機，請確認允許瀏覽器存取鏡頭權限！");
+          return;
+        }
+        Quagga.start();
+        isScanning = true;
+        updateStatus("📷 即時動態對焦中...");
+      });
+
+      // 監聽掃描結果
+      Quagga.onDetected(onBarcodeDetected);
+    }
+
+    function stopScanner() {
+      if (isScanning) {
+        Quagga.stop();
+        isScanning = false;
+        updateStatus("相機已停止");
+      }
+    }
+
+    function onBarcodeDetected(result) {
+      if (result && result.codeResult && result.codeResult.code) {
+        const code = result.codeResult.code;
+        
+        // 避免重複連續判定
+        if (code === currentBarcode) return;
+        
+        currentBarcode = code;
+        document.getElementById('manualBarcode').value = code;
+        updateStatus("✅ 掃描成功：" + code);
+        
+        if (navigator.vibrate) navigator.vibrate(100);
+
+        // 停止相機並查詢資料
+        stopScanner();
+        queryMedicine(code);
+      }
+    }
+
+    function searchManualBar() {
+      const val = document.getElementById('manualBarcode').value.trim();
+      if (val) {
+        currentBarcode = val;
+        queryMedicine(val);
+      }
+    }
+
+    // 發送 API 請求給 GAS
+    async function queryMedicine(barcode) {
+      updateStatus("資料庫查詢中...");
+      try {
+        const res = await fetch(`${GAS_API_URL}?action=getMedicine&barcode=${encodeURIComponent(barcode)}`);
+        const data = await res.json();
+        updateStatus(data.found ? "查詢成功" : "試算表未找到該藥品");
+        renderMedicineCard(data);
+      } catch (e) {
+        updateStatus("查詢失敗", true);
+      }
+    }
+
+    function renderMedicineCard(data) {
+      document.getElementById('medicineCard').classList.remove('hidden');
+      document.getElementById('medChineseName').innerText = data.chineseName || "--";
+      document.getElementById('medEnglishName').innerText = data.englishName || "--";
+      document.getElementById('medLicenseNo').innerText = data.licenseNo || "--";
+      document.getElementById('medImg').src = data.imageUrl || "";
+
+      const badge = document.getElementById('restockBadge');
+      if (data.needRestock) {
+        badge.className = "p-2.5 rounded-xl text-center font-bold text-sm bg-rose-100 text-rose-800 border border-rose-200";
+        badge.innerText = "⚠️ 狀態：需要備貨";
+      } else {
+        badge.className = "p-2.5 rounded-xl text-center font-bold text-sm bg-emerald-100 text-emerald-800 border border-emerald-200";
+        badge.innerText = "✅ 狀態：庫存正常（無需備貨）";
+      }
+    }
+
+    async function setRestock(flag) {
+      if (!currentBarcode) return;
+      updateStatus("更新中...");
+      try {
+        const res = await fetch(`${GAS_API_URL}?action=updateRestock&barcode=${encodeURIComponent(currentBarcode)}&flag=${flag}`);
+        const data = await res.json();
+        updateStatus("更新成功");
+        renderMedicineCard(data);
+      } catch (e) {
+        alert("更新失敗");
+      }
+    }
+  </script>
+</body>
+</html>
